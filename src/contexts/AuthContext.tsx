@@ -51,7 +51,10 @@ interface AuthContextType {
   lookupAuditorCompanies: (email: string) => Promise<{ success: boolean; companies?: AuditorCompany[]; error?: string }>;
   loginAuditorById: (auditorId: string, password: string) => Promise<{ success: boolean; error?: string }>;
   requestPasswordReset: (email: string) => Promise<{ success: boolean; error?: string }>;
-  completePasswordReset: (newPassword: string) => Promise<{ success: boolean; error?: string }>;
+  completePasswordReset: (
+    newPassword: string,
+    tokenHash?: string,
+  ) => Promise<{ success: boolean; error?: string; linkDead?: boolean }>;
   logout: () => Promise<void>;
   hasPermission: (resource: string, action?: 'view' | 'create' | 'edit' | 'delete') => boolean;
 }
@@ -149,6 +152,22 @@ function describeAuthError(error: unknown, fallback: string): string {
     return error.message;
   }
   return fallback;
+}
+
+/**
+ * Turns a failed recovery-token exchange into something a user can act on. Both
+ * "expired" and "already used" come back from GoTrue as the same family of
+ * errors, and both mean the same thing here: this link is spent, ask for another.
+ */
+function describeRecoveryLinkError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  if (/expired/i.test(message)) {
+    return 'This reset link has expired. Request a new one below.';
+  }
+  if (/invalid|not found|already/i.test(message)) {
+    return 'This reset link is no longer valid — it may already have been used. Request a new one below.';
+  }
+  return message || 'This reset link could not be verified. Request a new one below.';
 }
 
 function buildOwnerUser(profile: any, metadata: AuthMetadata = {}): User {
@@ -575,15 +594,42 @@ export function AuthProvider({ children }: { children: ReactNode }) {
    * new password. The MPIN is unaffected — it is stored on the account as its own
    * secret rather than as a wrapper around the password — so it keeps working.
    */
-  const completePasswordReset = async (newPassword: string) => {
+  const completePasswordReset = async (newPassword: string, tokenHash?: string) => {
     if (!isSupabaseConfigured) {
       return { success: false, error: 'Supabase is not configured.' };
     }
 
     try {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session) {
-        return { success: false, error: 'Your reset link has expired. Request a new one and try again.' };
+      if (tokenHash) {
+        // The emailed link hands the recovery token to this page as a query
+        // param rather than pointing at /auth/v1/verify, and it is spent HERE —
+        // at the moment a real person submits a new password. That endpoint
+        // consumes the single-use token on its first GET, and mail scanners,
+        // link previewers and antivirus proxies fetch every URL in a message
+        // before the recipient ever clicks one, which is what made reset links
+        // read as "expired" the instant the email landed.
+        const { error: verifyError } = await supabase.auth.verifyOtp({
+          type: 'recovery',
+          token_hash: tokenHash,
+        });
+
+        if (verifyError) {
+          if (isNetworkFailure(verifyError)) {
+            return { success: false, error: NETWORK_ERROR_MESSAGE };
+          }
+          return { success: false, error: describeRecoveryLinkError(verifyError), linkDead: true };
+        }
+      } else {
+        // Older links (and any /auth/v1/verify redirect) arrive with the session
+        // already established from the URL fragment.
+        const { data: { session } } = await supabase.auth.getSession();
+        if (!session) {
+          return {
+            success: false,
+            error: 'Your reset link has expired. Request a new one and try again.',
+            linkDead: true,
+          };
+        }
       }
 
       const { error } = await supabase.auth.updateUser({ password: newPassword });

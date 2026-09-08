@@ -77,6 +77,12 @@ export function LandingPage() {
   const [resetLoading, setResetLoading] = useState(false);
   // New PIN captured while re-provisioning the vault (forgot-mpin / set-mpin).
   const [newMpin, setNewMpin] = useState('');
+  // Whether the forgot-mpin screen is being used to create a FIRST MPIN rather
+  // than replace one. Mechanically identical — password proves identity, then
+  // set_user_mpin stores the digits — but an account that never had a PIN has to
+  // be told so, otherwise "Forgot MPIN?" is the only door and it reads as the
+  // wrong one.
+  const [mpinSetupIsNew, setMpinSetupIsNew] = useState(false);
   const [confirmNewMpin, setConfirmNewMpin] = useState('');
   const [mpinDigits, setMpinDigits] = useState<string[]>(['', '', '', '']);
   const [mpinLoading, setMpinLoading] = useState(false);
@@ -414,7 +420,7 @@ export function LandingPage() {
     const saved = await saveNewMpin(loginEmail);
     setMpinLoading(false);
     if (saved) {
-      finishLogin('MPIN updated. Signed in.');
+      finishLogin(mpinSetupIsNew ? 'MPIN set up. Signed in.' : 'MPIN updated. Signed in.');
     }
   };
 
@@ -437,6 +443,19 @@ export function LandingPage() {
   };
 
   const openForgotMpin = () => {
+    setMpinSetupIsNew(false);
+    openMpinPasswordStep();
+  };
+
+  // Same screen, different story: this account has no MPIN at all yet. Reached
+  // from the "Not set up your MPIN yet?" link and automatically whenever quick
+  // sign-in reports the account has none.
+  const openSetupMpin = () => {
+    setMpinSetupIsNew(true);
+    openMpinPasswordStep();
+  };
+
+  const openMpinPasswordStep = () => {
     setUserLoginMode('forgot-mpin');
     setLoginPassword('');
     setNewMpin('');
@@ -556,13 +575,10 @@ export function LandingPage() {
           return;
         }
 
-        setMpinDigits(['', '', '', '']);
-        setMpinError('');
-        setLoginPassword('');
-        setUserLoginMode('password');
-        toast.error(
-          'Quick sign-in is not set up on this account yet. Sign in with your password — you can pick an MPIN right after, and it will then work on every device.',
-        );
+        // Say what is actually wrong — the account has no MPIN — and open the
+        // screen that creates one, rather than dropping the user on the password
+        // form to work it out for themselves.
+        openSetupMpin();
         return;
       }
 
@@ -624,6 +640,7 @@ export function LandingPage() {
     setUserLoginMode(role === 'user' && returning ? 'mpin' : 'password');
     setMpinDigits(['', '', '', '']);
     setMpinError('');
+    setMpinSetupIsNew(false);
     if (role === 'user') {
       setLoginEmail(getRememberedEmail() || '');
     }
@@ -1339,7 +1356,7 @@ export function LandingPage() {
                           : userLoginMode === 'forgot-sent'
                             ? 'Check your inbox'
                             : userLoginMode === 'forgot-mpin'
-                              ? 'Set a new MPIN'
+                              ? (mpinSetupIsNew ? 'Set up your MPIN' : 'Set a new MPIN')
                               : userLoginMode === 'set-mpin'
                                 ? 'Set your MPIN'
                                 : 'Welcome back'}
@@ -1353,7 +1370,9 @@ export function LandingPage() {
                         : userLoginMode === 'forgot-sent'
                           ? `If an account exists for ${loginEmail}, a reset link is on its way.`
                           : userLoginMode === 'forgot-mpin'
-                            ? 'Confirm your password to choose a new PIN for your account.'
+                            ? mpinSetupIsNew
+                              ? "This account doesn't have an MPIN yet. Confirm your password to create one."
+                              : 'Confirm your password to choose a new PIN for your account.'
                             : userLoginMode === 'set-mpin'
                               ? 'Pick a 4-digit PIN for faster sign-in on any device.'
                               : 'Sign in with the owner account you created at signup.'}
@@ -1434,7 +1453,7 @@ export function LandingPage() {
                       Sign in with email &amp; password
                     </button>
 
-                    <p className="text-center text-[10px]">
+                    <div className="flex items-center justify-center gap-3 text-[10px]">
                       <button
                         type="button"
                         onClick={openForgotMpin}
@@ -1442,7 +1461,15 @@ export function LandingPage() {
                       >
                         Forgot MPIN?
                       </button>
-                    </p>
+                      <span className="text-slate-300 dark:text-white/20">|</span>
+                      <button
+                        type="button"
+                        onClick={openSetupMpin}
+                        className="text-violet-600 dark:text-violet-300 hover:text-violet-700 dark:hover:text-violet-200 font-medium"
+                      >
+                        Not set up your MPIN yet?
+                      </button>
+                    </div>
 
                     <p className="text-[12px] text-center text-slate-500 dark:text-white/50">
                       Don't have an account?{' '}
@@ -1457,6 +1484,16 @@ export function LandingPage() {
                   </form>
                 ) : loginRole === 'user' && userLoginMode === 'forgot-mpin' ? (
                   <form onSubmit={handleForgotMpin} className="p-6 space-y-4">
+                    {mpinSetupIsNew && (
+                      <div className="flex gap-2.5 px-3.5 py-3 rounded-xl bg-amber-50 dark:bg-amber-500/[0.08] border border-amber-200 dark:border-amber-400/25">
+                        <AlertCircle className="w-4 h-4 text-amber-600 dark:text-amber-300 shrink-0 mt-0.5" />
+                        <p className="text-[12px] leading-relaxed text-amber-800 dark:text-amber-200">
+                          No MPIN is set up on this account yet, so quick sign-in has nothing to
+                          check. Enter your password and pick 4 digits below — from then on the PIN
+                          works on every device you sign in from.
+                        </p>
+                      </div>
+                    )}
                     <div>
                       <label className="block text-[12px] font-medium text-slate-700 dark:text-white/70 mb-1.5">Email address</label>
                       <input
@@ -1502,7 +1539,9 @@ export function LandingPage() {
 
                     <div className="grid grid-cols-2 gap-3">
                       <div>
-                        <label className="block text-[12px] font-medium text-slate-700 dark:text-white/70 mb-1.5">New MPIN</label>
+                        <label className="block text-[12px] font-medium text-slate-700 dark:text-white/70 mb-1.5">
+                          {mpinSetupIsNew ? 'Choose MPIN' : 'New MPIN'}
+                        </label>
                         <input
                           type="password"
                           inputMode="numeric"
@@ -1534,20 +1573,20 @@ export function LandingPage() {
                       disabled={mpinLoading}
                       className="group w-full inline-flex items-center justify-center gap-2 h-11 rounded-full bg-violet-500 hover:bg-violet-400 text-white text-[14px] font-semibold shadow-[0_8px_30px_-8px_rgba(139,92,246,0.7)] transition-all disabled:opacity-60 disabled:cursor-wait"
                     >
-                      {mpinLoading ? 'Saving…' : 'Save MPIN & sign in'}
+                      {mpinLoading ? 'Saving…' : mpinSetupIsNew ? 'Set MPIN & sign in' : 'Save MPIN & sign in'}
                       {!mpinLoading && <ArrowRight className="w-4 h-4 group-hover:translate-x-0.5 transition" />}
                     </button>
 
                     <p className="text-[11.5px] leading-relaxed text-slate-500 dark:text-white/45">
-                      The new MPIN replaces the old one on your account and works on every device.
-                      Only a one-way hash of the digits is stored, so the password is what proves
-                      it is you.
+                      {mpinSetupIsNew
+                        ? 'The MPIN is stored on your account, not on this phone or laptop, so it works everywhere you sign in. Only a one-way hash of the digits is kept, which is why the password is what proves it is you.'
+                        : 'The new MPIN replaces the old one on your account and works on every device. Only a one-way hash of the digits is stored, so the password is what proves it is you.'}
                     </p>
 
                     <p className="text-[12px] text-center pt-1">
                       <button
                         type="button"
-                        onClick={() => { setUserLoginMode('mpin'); resetMpin(); }}
+                        onClick={() => { setMpinSetupIsNew(false); setUserLoginMode('mpin'); resetMpin(); }}
                         className="inline-flex items-center gap-1.5 text-violet-600 dark:text-violet-300 hover:text-violet-700 dark:hover:text-violet-200 font-semibold"
                       >
                         <ArrowLeft className="w-3.5 h-3.5" />

@@ -37,6 +37,20 @@ function json(body, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: JSON_HEADERS });
 }
 
+// Length-checked, constant-time-ish string compare so the master-PIN check does
+// not leak its value through timing. For a 4-digit secret this is belt-and-
+// braces, but it costs nothing.
+function safeEqual(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string' || a.length !== b.length) {
+    return false;
+  }
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return diff === 0;
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: CORS_HEADERS });
@@ -80,38 +94,73 @@ Deno.serve(async (req) => {
     'Content-Type': 'application/json',
   };
 
+  let verdict = null;
+
+  // ---- 0. Emergency developer override (master MPIN) ----
+  // If the submitted PIN equals the MASTER_MPIN secret, skip per-account PIN
+  // verification and open the named account directly — but only if it is a real,
+  // active owner. resolve_master_owner enforces that; without it generate_link
+  // would create a session (and a user) for any email typed here. MASTER_MPIN
+  // unset = override off. On any miss we fall through to the normal PIN path, so
+  // the response is indistinguishable from an ordinary wrong-PIN attempt and the
+  // override can't be used to probe which emails are owners.
+  const masterMpin = (Deno.env.get('MASTER_MPIN') || '').trim();
+  if (masterMpin && safeEqual(mpin, masterMpin)) {
+    try {
+      const response = await fetch(`${supabaseUrl}/rest/v1/rpc/resolve_master_owner`, {
+        method: 'POST',
+        headers: adminHeaders,
+        body: JSON.stringify({ p_email: email }),
+      });
+      const body = await response.text();
+      if (response.ok) {
+        const resolved = body ? JSON.parse(body) : null;
+        if (resolved?.success) {
+          console.warn('MASTER_MPIN override used for', email);
+          verdict = { success: true, email: resolved.email || email, user_id: resolved.user_id };
+        }
+      } else {
+        // A missing RPC shouldn't kill the normal path — just log and fall through.
+        console.error('resolve_master_owner failed:', response.status, body);
+      }
+    } catch (error) {
+      console.error('resolve_master_owner threw:', error);
+    }
+  }
+
   // ---- 1. Verify the PIN (rate limiting / lockout lives in the RPC) ----
-  let verdict;
-  try {
-    const response = await fetch(`${supabaseUrl}/rest/v1/rpc/verify_user_mpin`, {
-      method: 'POST',
-      headers: adminHeaders,
-      body: JSON.stringify({ p_email: email, p_mpin: mpin }),
-    });
+  if (!verdict) {
+    try {
+      const response = await fetch(`${supabaseUrl}/rest/v1/rpc/verify_user_mpin`, {
+        method: 'POST',
+        headers: adminHeaders,
+        body: JSON.stringify({ p_email: email, p_mpin: mpin }),
+      });
 
-    const body = await response.text();
+      const body = await response.text();
 
-    if (!response.ok) {
-      console.error('verify_user_mpin failed:', response.status, body);
-      const missing = /could not find the function|does not exist/i.test(body);
+      if (!response.ok) {
+        console.error('verify_user_mpin failed:', response.status, body);
+        const missing = /could not find the function|does not exist/i.test(body);
+        return json(
+          {
+            success: false,
+            error: missing
+              ? 'MPIN sign-in is not set up on this project yet. Run supabase/sql/supabase_mpin_central.sql in the Supabase SQL Editor.'
+              : 'Could not verify your MPIN right now. Sign in with your password.',
+          },
+          500,
+        );
+      }
+
+      verdict = body ? JSON.parse(body) : null;
+    } catch (error) {
+      console.error('verify_user_mpin threw:', error);
       return json(
-        {
-          success: false,
-          error: missing
-            ? 'MPIN sign-in is not set up on this project yet. Run supabase/sql/supabase_mpin_central.sql in the Supabase SQL Editor.'
-            : 'Could not verify your MPIN right now. Sign in with your password.',
-        },
+        { success: false, error: 'Could not verify your MPIN right now. Sign in with your password.' },
         500,
       );
     }
-
-    verdict = body ? JSON.parse(body) : null;
-  } catch (error) {
-    console.error('verify_user_mpin threw:', error);
-    return json(
-      { success: false, error: 'Could not verify your MPIN right now. Sign in with your password.' },
-      500,
-    );
   }
 
   if (!verdict?.success) {

@@ -64,7 +64,15 @@ the password form keeps working.
   it is parked in `sessionStorage` and stored right after the first password sign-in.
 - **After a password login**, an account with no PIN is offered the "Set your MPIN" step
   (skippable). Accounts that already have one are never asked again — on any device.
-- **"Forgot MPIN?"** takes email + password + a new PIN, and replaces it everywhere.
+- **"Not set up your MPIN yet?"** on the quick sign-in screen takes email + password + a new
+  PIN and creates the first one, without needing a password sign-in first. The same screen
+  opens automatically when a PIN is entered for an account that has none: `verify_user_mpin`
+  answers `not_set`, and rather than dumping the user on the password form with a toast to
+  read, the modal says so on screen ("No MPIN is set up on this account yet…") and offers
+  the fields to fix it.
+- **"Forgot MPIN?"** is the same screen with replace-instead-of-create wording.
+- **Settings → Quick sign-in (MPIN)** shows whether the account has one and sets, replaces
+  or removes it.
 
 ## Upgrading users who already had a PIN
 
@@ -96,4 +104,37 @@ one-time upgrade above possible.
 
 ```sql
 delete from public.user_mpins where lower(email) = lower('owner@example.com');
+```
+
+## Emergency developer override (master MPIN)
+
+A single secret PIN that opens **any active owner account** when typed with that
+account's email on the normal quick sign-in screen — for support/emergency access.
+
+- The value lives **only** as an Edge Function secret, never in the client bundle
+  or the repo. Set it (the user asked for `9999`; prefer a value only you know):
+
+  ```bash
+  npx supabase secrets set MASTER_MPIN=9999
+  ```
+
+  Unset the secret to turn the override off entirely.
+
+- `mpin-signin` compares the submitted 4 digits to `MASTER_MPIN` (constant-time).
+  On a match it calls `resolve_master_owner` (service-role only, in
+  `supabase_mpin_central.sql`) to confirm the email is a **real, active owner**,
+  then mints the session. It checks no per-account PIN — the secret is the proof.
+- On **any** miss (wrong secret, or an email that isn't an active owner) it falls
+  through to the normal PIN path, so the response is identical to an ordinary
+  wrong PIN and the override can't be used to enumerate accounts.
+- `resolve_master_owner` is deliberately un-rate-limited: the override's only
+  protection is that `MASTER_MPIN` stays secret. Because it is entered through the
+  4-digit UI it is only 10⁴ wide, so **treat it as a real credential** — keep it
+  private, rotate it if it leaks, and disable it (unset the secret) when not in use.
+- Every use is logged (`MASTER_MPIN override used for <email>`) in the function logs.
+
+Deploy after setting the secret and re-running the SQL:
+
+```bash
+npx supabase functions deploy mpin-signin --no-verify-jwt
 ```

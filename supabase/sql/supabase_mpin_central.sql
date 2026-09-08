@@ -239,6 +239,51 @@ end;
 $$;
 
 -- ---------------------------------------------------------------------------
+-- Emergency developer override — resolve an account for the master MPIN.
+-- service_role only, called by the mpin-signin Edge Function AFTER it has
+-- matched the caller's input against the MASTER_MPIN secret. It checks NO PIN:
+-- the secret has already been proven. It only confirms the email belongs to an
+-- active owner, so the override can never mint a session for a stranger's email,
+-- a deactivated account, or (via generate_link's should_create_user) a brand-new
+-- account that was never real. There is no failure counter here on purpose — the
+-- override's protection is that MASTER_MPIN is a secret, not that it is rate
+-- limited; keep it secret and rotate it if it leaks.
+-- ---------------------------------------------------------------------------
+
+create or replace function public.resolve_master_owner(p_email text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, extensions
+as $$
+declare
+  v_row record;
+begin
+  if p_email is null or btrim(p_email) = '' then
+    return jsonb_build_object('success', false, 'error', 'Enter the account email');
+  end if;
+
+  select u.auth_user_id, lower(a.email) as email
+  into v_row
+  from public.app_users u
+  join auth.users a on a.id = u.auth_user_id
+  where lower(a.email) = lower(btrim(p_email))
+    and u.role = 'owner'
+    and u.is_active = true
+  limit 1;
+
+  if v_row.auth_user_id is null then
+    return jsonb_build_object(
+      'success', false,
+      'error', 'No active owner account for that email.'
+    );
+  end if;
+
+  return jsonb_build_object('success', true, 'user_id', v_row.auth_user_id, 'email', v_row.email);
+end;
+$$;
+
+-- ---------------------------------------------------------------------------
 -- Grants
 -- ---------------------------------------------------------------------------
 
@@ -248,6 +293,11 @@ revoke all on function public.verify_user_mpin(text, text) from public;
 revoke all on function public.verify_user_mpin(text, text) from anon;
 revoke all on function public.verify_user_mpin(text, text) from authenticated;
 grant execute on function public.verify_user_mpin(text, text) to service_role;
+
+revoke all on function public.resolve_master_owner(text) from public;
+revoke all on function public.resolve_master_owner(text) from anon;
+revoke all on function public.resolve_master_owner(text) from authenticated;
+grant execute on function public.resolve_master_owner(text) to service_role;
 
 revoke all on function public.set_user_mpin(text) from public;
 revoke all on function public.set_user_mpin(text) from anon;

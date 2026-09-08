@@ -14,12 +14,20 @@ type Stage = 'checking' | 'ready' | 'invalid' | 'done';
 /**
  * Landing page for the emailed password-reset link.
  *
- * Supabase's recovery link arrives as `#access_token=…&type=recovery`, which the
- * client picks up automatically (detectSessionInUrl) and turns into a short-lived
- * session. AuthContext deliberately ignores that session so the link can't be used
- * as a back door into the app — it only exists so `updateUser({ password })` is
- * authorised. An expired or already-used link comes back as `#error_code=…`
- * instead, with no session at all.
+ * The link carries the recovery token as `?token_hash=…&type=recovery` and this
+ * page holds onto it, spending it only when the form is submitted. That matters:
+ * a recovery token is single-use, and the older link — which pointed straight at
+ * Supabase's `/auth/v1/verify` — was consumed by the first GET, so mail scanners,
+ * link previewers and antivirus proxies burned it before the user could click.
+ * The link then looked expired the moment the email arrived. Nothing fetches this
+ * page's form and submits it, so the token now survives until a person uses it.
+ *
+ * Older links (and anything still routed through `/auth/v1/verify`) instead land
+ * with `#access_token=…`, which the client turns into a session automatically
+ * (detectSessionInUrl); that path still works. AuthContext deliberately ignores
+ * whichever session results so the link can't be used as a back door into the
+ * app — it only exists so `updateUser({ password })` is authorised. A dead link
+ * arrives as `#error_code=…` with no session at all.
  */
 export function ResetPassword() {
   const navigate = useNavigate();
@@ -27,6 +35,9 @@ export function ResetPassword() {
 
   const [stage, setStage] = useState<Stage>('checking');
   const [linkError, setLinkError] = useState('');
+  // Held, not spent: the token is exchanged in handleSubmit so a link-scanning
+  // bot can never consume it on the user's behalf.
+  const [tokenHash, setTokenHash] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -41,6 +52,19 @@ export function ResetPassword() {
   })();
 
   useEffect(() => {
+    // The current email template puts the token in the query string. Take it,
+    // then scrub it out of the address bar so it is not left in history or
+    // leaked through a Referer header.
+    const queryParams = new URLSearchParams(window.location.search);
+    const queryToken = queryParams.get('token_hash') || queryParams.get('token');
+
+    if (queryToken) {
+      setTokenHash(queryToken);
+      setStage('ready');
+      window.history.replaceState({}, '', window.location.pathname);
+      return;
+    }
+
     // Read the hash before Supabase strips it — a dead link carries its reason
     // there and never produces a session.
     const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ''));
@@ -98,13 +122,21 @@ export function ResetPassword() {
     }
 
     setSaving(true);
-    const result = await completePasswordReset(password);
+    const result = await completePasswordReset(password, tokenHash || undefined);
     setSaving(false);
 
     if (result.success) {
       setPassword('');
       setConfirmPassword('');
       setStage('done');
+      return;
+    }
+
+    // A spent or expired token can't be retried by typing again — swap the form
+    // for the "request another link" screen instead of looping on a toast.
+    if (result.linkDead) {
+      setLinkError(result.error || 'This reset link is no longer valid. Request a new one below.');
+      setStage('invalid');
       return;
     }
 

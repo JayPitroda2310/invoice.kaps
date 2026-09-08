@@ -92,20 +92,28 @@ and replace the message body with the contents of `docs/reset-password-email.htm
 (in this repo). It carries GSTInvoice Pro branding, mentions the 15-minute expiry, and
 contains no reference to Supabase.
 
-The link in it deliberately does **not** use `{{ .ConfirmationURL }}`. That variable expands
-to `https://ynqncdczpumsenjhcmxk.supabase.co/auth/v1/verify?…`, which both shows Supabase in
-the URL and requires the browser to reach `supabase.co` — the exact thing `api/proxy.ts`
-exists to avoid for users whose ISP blocks it. The template routes through our own domain
-instead:
+The link in it points straight at our own page and carries the token as a query param:
 
 ```
-{{ .SiteURL }}/api/sb/auth/v1/verify?token={{ .TokenHash }}&type=recovery&redirect_to={{ .SiteURL }}/reset-password
+{{ .RedirectTo }}?token_hash={{ .TokenHash }}&type=recovery
 ```
 
-`api/proxy.ts` forwards with `redirect: 'manual'` and passes the upstream `302` and its
-`Location` header straight back, so the browser still lands on
-`/reset-password#access_token=…`. Vite's dev server proxies `/api/sb` the same way, so this
-works on localhost too.
+**This is what stops links expiring on arrival.** It deliberately does **not** use
+`{{ .ConfirmationURL }}` or any `/auth/v1/verify` URL. A recovery token is single-use, and
+`/auth/v1/verify` spends it on the **first GET** — so Outlook Safe Links, corporate mail
+gateways, antivirus scanners and chat-app link previewers, all of which fetch every URL in
+a message the moment it is delivered, burned the token before the recipient could click.
+The user then landed on `#error_code=otp_expired` seconds after the email arrived.
+
+With the token in a query param, `ResetPassword.tsx` reads it, scrubs it from the address
+bar and holds it in memory, exchanging it via `verifyOtp({ type: 'recovery', token_hash })`
+only when the new password is submitted. Scanners fetch HTML; they do not fill in forms, so
+the token survives until a person uses it.
+
+`{{ .RedirectTo }}` is the `redirectTo` that `requestPasswordReset()` passes — the current
+origin plus `/reset-password` — so the same template serves production and localhost, as
+long as both are on the Redirect URLs allowlist from step 1. Links sent by the older
+template still work: the page keeps its `#access_token=…` path as a fallback.
 
 ## 4. Rate limits
 
@@ -123,17 +131,20 @@ Custom SMTP is configured. Worth looking at so you know the current number.
    whether an address has an account.
 3. The emailed link opens `/reset-password`, where the user sets a password of at least
    8 characters (matching the signup rule) and confirms it.
-4. On success the user is signed out, the device MPIN vault is cleared (it still holds the
-   old password, so quick sign-in would otherwise replay stale credentials), and they are
-   sent back to `/?signin=1`, which reopens the modal on the email + password screen.
-5. Signing in with the new password lands on a "set your MPIN" step, since the device has
-   no vault any more. Choosing a PIN there re-enables quick sign-in; skipping just means
-   password-only on this device.
+4. The token is exchanged and the password changed in the same submit. On success the user
+   is signed out, the obsolete device vault is cleared (it still holds the old password, so
+   quick sign-in would otherwise replay stale credentials), and they are sent back to
+   `/?signin=1`, which reopens the modal on the email + password screen.
+5. Signing in with the new password lands on a "set your MPIN" step only if the account has
+   no MPIN. The MPIN lives on the account as its own bcrypt hash, so a password reset does
+   not disturb it — anyone who already had one keeps it.
 
-The same "set your MPIN" step also backs **Forgot MPIN?** on the quick sign-in screen. The
-PIN is only ever a device-local key over stored credentials, so it cannot be recovered — it
-can only be replaced, and replacing it requires the password. A user who has forgotten both
-resets the password first, then sets a new PIN.
+If the token turns out to be spent or expired at submit time, the page swaps to the "request
+a new one" screen rather than looping on a toast.
+
+Quick sign-in has its own doors on the PIN screen: **Forgot MPIN?** replaces an existing PIN
+and **Not set up your MPIN yet?** creates a first one. Both take email + password + 4 digits.
+A user who has forgotten both resets the password first, then sets a PIN.
 
 ### Security note
 

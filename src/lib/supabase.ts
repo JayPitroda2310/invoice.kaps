@@ -29,4 +29,17 @@ const clientUrl =
     ? `${window.location.origin}${proxyPath}`
     : effectiveSupabaseUrl;
 
-export const supabase = createClient(clientUrl, effectiveSupabaseAnonKey);
+// Never attach cookies to a Supabase call. /api/sb is on our own origin, so the
+// browser treats every cookie set on the domain as first-party and sends the
+// whole jar with each request. Vercel's edge rejects a request whose headers
+// exceed its limit with REQUEST_HEADER_TOO_LARGE *before* api/proxy.ts runs, so
+// stripping them inside the proxy is too late — the sign-in call fails with the
+// right password and no server log. Supabase authenticates with the apikey and
+// Authorization headers alone and has no use for cookies, so omitting them costs
+// nothing and puts a hard ceiling on the request size.
+const fetchWithoutCookies: typeof fetch = (input, init) =>
+  fetch(input, { ...init, credentials: 'omit' });
+
+export const supabase = createClient(clientUrl, effectiveSupabaseAnonKey, {
+  global: { fetch: fetchWithoutCookies },
+});
